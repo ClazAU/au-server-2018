@@ -3,11 +3,10 @@ using Hazel;
 using Hazel.Udp;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Serilog;
 
 namespace TimeMachine;
 
-public class MatchmakerService(ILogger<MatchmakerService> logger, ClientManager clientManager) : BackgroundService
+public partial class MatchmakerService(ILogger<MatchmakerService> logger, ClientManager clientManager) : BackgroundService
 {
     private const int BroadcastVersion = 36943350; // 2018.9.6.0
 
@@ -20,7 +19,7 @@ public class MatchmakerService(ILogger<MatchmakerService> logger, ClientManager 
             // AcceptConnection = 
         };
 
-        connectionListener.NewConnection += OnNewConnection;
+        connectionListener.NewConnection += HandleNewConnection;
         connectionListener.Start();
 
         await Task.Delay(Timeout.Infinite, stoppingToken);
@@ -28,34 +27,39 @@ public class MatchmakerService(ILogger<MatchmakerService> logger, ClientManager 
         connectionListener.Close();
     }
 
-    private void OnNewConnection(object? sender, NewConnectionEventArgs newConnectionEventArgs)
+    private void HandleNewConnection(object? sender, NewConnectionEventArgs newConnectionEventArgs)
     {
         var connection = newConnectionEventArgs.Connection;
 
         var handshakeDataMessageReader = MessageReader.Get(newConnectionEventArgs.HandshakeData);
-        var whatIsThis = handshakeDataMessageReader.ReadByte();
+        var hazelVersion = handshakeDataMessageReader.ReadByte();
         var broadcastVersion = handshakeDataMessageReader.ReadInt32();
 
         if (broadcastVersion != BroadcastVersion)
         {
-            SendIncorrectVersion(connection);
-            Log.Debug("Client tried to join with incompatible broadcast version");
+            SendDisconnectForIncorrectVersion(connection);
+            connection.Close();
+
+            logger.LogDebug("Client tried to join with incompatible broadcast version");
             return;
         }
 
         var client = clientManager.AddClient(connection);
-        Log.Information("Client {ClientId} added from {ConnectionEndPoint}", client.Id, connection.EndPoint);
 
         newConnectionEventArgs.Recycle();
     }
 
-    private void SendIncorrectVersion(Connection connection)
+    private static void SendDisconnectForIncorrectVersion(Connection connection)
     {
         var messageWriter = MessageWriter.Get(SendOption.Reliable);
-        messageWriter.StartMessage(1); // TODO: Enum
-        messageWriter.Write(5); // TODO: Wat dis?
+        messageWriter.StartMessage((byte) Tags.JoinGame); // Yep, this is correct
+        messageWriter.Write((int) DisconnectReason.IncorrectVersion);
         messageWriter.EndMessage();
         connection.Send(messageWriter);
         messageWriter.Recycle();
+
+        // TODO: Is it safe to close the connection immediately?
+        //       Should we wait a little bit and then disconnect if still connected?
+        // connection.Close();
     }
 }

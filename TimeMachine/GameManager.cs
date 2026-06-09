@@ -23,18 +23,19 @@ public class GameManager(IServiceProvider serviceProvider)
         return true;
     }
 
-    public bool TryFindGameByClient(Client client, [NotNullWhen(true)] out Game? game)
+    public void CloseGame(GameCode gameCode)
     {
-        foreach (var candidateGame in _games.Values)
+        if (!_games.Remove(gameCode, out var game)) return;
+
+        game.State = Game.GameState.Closed;
+
+        foreach (var client in game.Clients.Values)
         {
-            if (candidateGame.Clients.ContainsKey(client.Id))
-            {
-                game = candidateGame;
-                return true;
-            }
+            client.Disconnect(DisconnectReason.Destroy);
         }
 
-        game = null;
-        return false;
+        // TODO: Log
+
+        game.Dispose();
     }
 }

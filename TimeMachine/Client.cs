@@ -13,6 +13,27 @@ public partial class Client(
     public int Id { get; } = id;
     public Connection Connection { get; } = connection;
 
+    public bool Disconnected { get; private set; }
+
+    public void Disconnect(JoinFailureReason reason)
+        => Disconnect((DisconnectReason) reason);
+
+    public void Disconnect(DisconnectReason reason)
+    {
+        if (Disconnected) return;
+        Disconnected = true;
+
+        var messageWriter = MessageWriter.Get(SendOption.Reliable);
+        messageWriter.StartMessage((byte) Tags.JoinGame); // Yep, this is correct
+        messageWriter.Write((int) reason);
+        messageWriter.EndMessage();
+
+        Connection.Send(messageWriter);
+        messageWriter.Recycle();
+
+        clientManager.QueueDisconnect(this);
+    }
+
     public void HandleMessage(byte[] bytes, MessageReader messageReader, SendOption sendOption)
     {
         var tag = (Tags) messageReader.Tag;
@@ -22,13 +43,16 @@ public partial class Client(
         {
             case Tags.HostGame:
             {
-                // TODO: Read client host game message
+                // Client doesn't seem to handle disconnect messages from here so don't bother.
 
-                var newGameCode = GameCode.GenerateRandom();
+                var newGameCode = GameCode.TryFromCode("CLAZ", out var clazGameCode) &&
+                                  !gameManager.Games.ContainsKey(clazGameCode)
+                    ? clazGameCode
+                    : GameCode.GenerateRandom();
 
                 if (!gameManager.TryCreateGame(newGameCode, out var game))
                 {
-                    // TODO: Log and disconnect
+                    // TODO: Log
                     break;
                 }
 
@@ -36,7 +60,7 @@ public partial class Client(
 
                 {
                     hostGameMessageWriter.StartMessage((byte) Tags.HostGame);
-                    hostGameMessageWriter.Write(newGameCode.Id);
+                    hostGameMessageWriter.Write(game.GameCode.Id);
                     hostGameMessageWriter.EndMessage();
                 }
 
@@ -46,29 +70,47 @@ public partial class Client(
             }
             case Tags.JoinGame:
             {
+                // TODO: Check if game started or too full or what else? There's an enum for this I think
+
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
                     LogJoinInvalidGameId(logger, Id, gameId);
-                    // TODO: Log and disconnect
+                    Disconnect(JoinFailureReason.GameNotFound);
                     break;
                 }
 
                 if (!gameManager.Games.TryGetValue(gameCode, out var game))
                 {
-                    // TODO: Log and disconnect
+                    // TODO: Log
+                    Disconnect(JoinFailureReason.GameNotFound);
+                    break;
+                }
+
+                if (game.State is not Game.GameState.Lobby)
+                {
+                    // TODO: Log
+                    Disconnect(JoinFailureReason.GameStarted);
+                }
+
+                if (game.IsFull())
+                {
+                    // TODO: Log
+                    Disconnect(JoinFailureReason.TooManyPlayers);
                     break;
                 }
 
                 if (!game.TryAddClient(this))
                 {
-                    // TODO: Log and disconnect
+                    // TODO: Log
+                    Disconnect(DisconnectReason.Error);
                     break;
                 }
 
                 if (game.Host is not {} host)
                 {
-                    // TODO: Huh? Disconnect and clean up game
+                    // TODO: Huh? Log
+                    gameManager.CloseGame(gameCode);
                     break;
                 }
 
@@ -110,20 +152,68 @@ public partial class Client(
 
                 break;
             }
-
-
-            case Tags.GameData:
+            case Tags.StartGame:
             {
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
-                    // TODO: Log and disconnect(?)
+                    // TODO: Log
                     break;
                 }
 
                 if (!gameManager.Games.TryGetValue(gameCode, out var game))
                 {
-                    // TODO: Log and disconnect(?)
+                    // TODO: Log
+                    break;
+                }
+
+                if (game.Host is not {} host)
+                {
+                    // TODO: No players? Log
+                    break;
+                }
+
+                if (Id != host.Id || game.State is not Game.GameState.Lobby)
+                {
+                    // Nuh uh
+                    break;
+                }
+
+                game.State = Game.GameState.Started;
+
+                var joinGameMessageWriter = MessageWriter.Get();
+                // TODO: I don't know how this makes sense but it's what the base game internal server does, which I
+                //       assume works by accident
+                joinGameMessageWriter.Write(bytes);
+
+                game.Broadcast(joinGameMessageWriter, this);
+                joinGameMessageWriter.Recycle();
+
+                break;
+            }
+            case Tags.RemoveGame:
+            {
+                // Base game server implements this, but it's never called by the client?
+                break;
+            }
+            case Tags.RemovePlayer:
+            {
+                // Among Us 2018.9.6.0 doesn't even have kick/ban functionality,
+                // so I'm not gonna bother implementing this
+                break;
+            }
+            case Tags.GameData:
+            {
+                var gameId = messageReader.ReadInt32();
+                if (!GameCode.TryFromId(gameId, out var gameCode))
+                {
+                    // TODO: Log
+                    break;
+                }
+
+                if (!gameManager.Games.TryGetValue(gameCode, out var game))
+                {
+                    // TODO: Log
                     break;
                 }
 
@@ -142,7 +232,7 @@ public partial class Client(
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
-                    // TODO: Log and disconnect(?)
+                    // TODO: Log
                     break;
                 }
 
@@ -150,19 +240,19 @@ public partial class Client(
 
                 if (!gameManager.Games.TryGetValue(gameCode, out var game))
                 {
-                    // TODO: Log and disconnect(?)
+                    // TODO: Log
                     break;
                 }
 
                 if (!game.Clients.ContainsKey(targetClientId))
                 {
-                    // TODO: Log and disconnect(?)
+                    // TODO: Log
                     break;
                 }
 
                 if (!clientManager.Clients.TryGetValue(targetClientId, out var targetClient))
                 {
-                    // TODO: Something went wrong. Client in game but not client manager?
+                    // TODO: Something went wrong. Client in game but not client manager? Log
                     break;
                 }
 
@@ -176,10 +266,64 @@ public partial class Client(
 
                 break;
             }
+            case Tags.EndGame:
+            {
+                var gameId = messageReader.ReadInt32();
+                if (!GameCode.TryFromId(gameId, out var gameCode))
+                {
+                    // TODO: Log
+                    break;
+                }
+
+                if (!gameManager.Games.TryGetValue(gameCode, out var game))
+                {
+                    // TODO: Log
+                    break;
+                }
+
+                if (game.State is not Game.GameState.Started)
+                {
+                    break;
+                }
+
+                if (game.Host is not {} host)
+                {
+                    // TODO: Huh? Disconnect and clean up game
+                    break;
+                }
+
+                if (Id != host.Id)
+                {
+                    // Nuh uh
+                    break;
+                }
+
+                game.State = Game.GameState.Lobby;
+
+                var reason = (GameOverReason) messageReader.ReadByte();
+                var showAd = messageReader.ReadBoolean();
+
+                var endGameMessageWriter = MessageWriter.Get(SendOption.Reliable);
+                // TODO: I don't know how this makes sense but it's what the base game internal server does, which I
+                //       assume works by accident
+                endGameMessageWriter.Write(bytes);
+
+                game.Broadcast(endGameMessageWriter, null);
+                endGameMessageWriter.Recycle();
+
+                game.ClearClients();
+
+                break;
+            }
+            default:
+            {
+                LogUnknownTag(logger, Id, tag);
+                break;
+            }
         }
     }
 
-    public void OnDisconnected(DisconnectedEventArgs disconnectedEventArgs)
+    public void HandleDisconnected(DisconnectedEventArgs disconnectedEventArgs)
     {
         LogClientDisconnect(logger, disconnectedEventArgs.Exception, Id);
         disconnectedEventArgs.Recycle();
@@ -187,7 +331,7 @@ public partial class Client(
         Connection.Dispose();
     }
 
-    [LoggerMessage(LogLevel.Information, "Client {ClientId} DC")]
+    [LoggerMessage(LogLevel.Information, "Client {ClientId} disconnected")]
     static partial void LogClientDisconnect(ILogger<Client> logger, Exception exception, int clientId);
 
     [LoggerMessage(LogLevel.Debug, "Client {ClientId} message with tag {Tag}")]
@@ -198,4 +342,7 @@ public partial class Client(
 
     [LoggerMessage(LogLevel.Debug, "Client {ClientId} joined game {GameCode}")]
     static partial void LogJoinedGame(ILogger<Client> logger, int clientId, GameCode gameCode);
+
+    [LoggerMessage(LogLevel.Debug, "Client {ClientId} sent unknown tag {Tag}")]
+    static partial void LogUnknownTag(ILogger<Client> logger, int ClientId, Tags Tag);
 }
