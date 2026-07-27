@@ -39,6 +39,14 @@ public partial class Client(
         var tag = (Tags) messageReader.Tag;
         LogGotMessage(logger, Id, tag);
 
+        bool CanRead(int byteCount)
+        {
+            if (messageReader.BytesRemaining() >= byteCount) return true;
+
+            LogTruncatedMessage(logger, Id, tag);
+            return false;
+        }
+
         switch (tag)
         {
             case Tags.HostGame:
@@ -71,6 +79,8 @@ public partial class Client(
             case Tags.JoinGame:
             {
                 // TODO: Check if game started or too full or what else? There's an enum for this I think
+
+                if (!CanRead(sizeof(int))) break;
 
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
@@ -154,6 +164,8 @@ public partial class Client(
             }
             case Tags.StartGame:
             {
+                if (!CanRead(sizeof(int))) break;
+
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
@@ -204,6 +216,8 @@ public partial class Client(
             }
             case Tags.GameData:
             {
+                if (!CanRead(sizeof(int))) break;
+
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
@@ -229,6 +243,8 @@ public partial class Client(
             }
             case Tags.GameDataTo:
             {
+                if (!CanRead(sizeof(int))) break;
+
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
@@ -236,7 +252,11 @@ public partial class Client(
                     break;
                 }
 
-                var targetClientId = messageReader.ReadPackedInt32();
+                if (!messageReader.TryReadPackedInt32(out var targetClientId))
+                {
+                    LogTruncatedMessage(logger, Id, tag);
+                    break;
+                }
 
                 if (!gameManager.Games.TryGetValue(gameCode, out var game))
                 {
@@ -268,6 +288,9 @@ public partial class Client(
             }
             case Tags.EndGame:
             {
+                // Checked up front so a truncated message can't leave the game state half changed.
+                if (!CanRead(sizeof(int) + sizeof(byte) + sizeof(bool))) break;
+
                 var gameId = messageReader.ReadInt32();
                 if (!GameCode.TryFromId(gameId, out var gameCode))
                 {
@@ -336,6 +359,9 @@ public partial class Client(
 
     [LoggerMessage(LogLevel.Debug, "Client {ClientId} message with tag {Tag}")]
     static partial void LogGotMessage(ILogger<Client> logger, int clientId, Tags tag);
+
+    [LoggerMessage(LogLevel.Debug, "Client {ClientId} sent a truncated message with tag {Tag}")]
+    static partial void LogTruncatedMessage(ILogger<Client> logger, int clientId, Tags tag);
 
     [LoggerMessage(LogLevel.Debug, "Client {ClientId} tried to join unknown game with invalid game ID {GameId}")]
     static partial void LogJoinInvalidGameId(ILogger<Client> logger, int clientId, int gameId);
