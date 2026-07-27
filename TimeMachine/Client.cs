@@ -349,7 +349,6 @@ public partial class Client(
     public void HandleDisconnected(DisconnectedEventArgs disconnectedEventArgs)
     {
         LogClientDisconnect(logger, disconnectedEventArgs.Exception, Id);
-        disconnectedEventArgs.Recycle();
 
         Connection.Dispose();
     }
