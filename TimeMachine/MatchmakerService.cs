@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using Hazel;
 using Hazel.Udp;
 using Microsoft.Extensions.Hosting;
@@ -19,15 +20,19 @@ public partial class MatchmakerService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var listenEndPoint = new IPEndPoint(options.ListenAddress, options.ListenPort);
+        var ipMode = listenEndPoint.AddressFamily is AddressFamily.InterNetworkV6 ? IPMode.IPv6 : IPMode.IPv4;
+
         using var connectionListener = new UdpConnectionListener(
-            new NetworkEndPoint(
-                new IPEndPoint(new IPAddress([127, 0, 0, 1]), 22023)))
+            new NetworkEndPoint(listenEndPoint, ipMode))
         {
             // AcceptConnection = 
         };
 
         connectionListener.NewConnection += HandleNewConnection;
         connectionListener.Start();
+
+        LogListening(logger, options.ListenAddress, options.ListenPort, options.MaxConnections);
 
         await Task.Delay(Timeout.Infinite, stoppingToken);
 
@@ -122,6 +127,9 @@ public partial class MatchmakerService(
         //       Should we wait a little bit and then disconnect if still connected?
         // connection.Close();
     }
+
+    [LoggerMessage(LogLevel.Information, "Listening on {ListenAddress}:{ListenPort} for up to {MaxConnections} connections")]
+    static partial void LogListening(ILogger<MatchmakerService> logger, IPAddress listenAddress, int listenPort, int maxConnections);
 
     [LoggerMessage(LogLevel.Debug, "Client {RemoteAddress} tried to join with incompatible broadcast version {BroadcastVersion}")]
     static partial void LogIncompatibleBroadcastVersion(ILogger<MatchmakerService> logger, IPAddress? remoteAddress, int broadcastVersion);
