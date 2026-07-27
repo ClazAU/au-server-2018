@@ -14,6 +14,8 @@ internal static class Program
             .WriteTo.Console()
             .CreateBootstrapLogger();
 
+        AppDomain.CurrentDomain.UnhandledException += HandleUnhandledException;
+
         try
         {
             Log.Information("Starting host");
@@ -29,6 +31,18 @@ internal static class Program
         {
             Log.CloseAndFlush();
         }
+    }
+
+    // The receive path runs on thread pool threads, where an escaped exception tears the process down before
+    // anything is written to the log.
+    private static void HandleUnhandledException(object sender, UnhandledExceptionEventArgs unhandledExceptionEventArgs)
+    {
+        Log.Fatal(
+            unhandledExceptionEventArgs.ExceptionObject as Exception,
+            "Unhandled exception, terminating: {IsTerminating}",
+            unhandledExceptionEventArgs.IsTerminating);
+
+        Log.CloseAndFlush();
     }
 
     private static HostApplicationBuilder CreateHostBuilder(string[] args)

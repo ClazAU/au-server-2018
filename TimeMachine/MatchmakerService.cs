@@ -10,6 +10,9 @@ public partial class MatchmakerService(ILogger<MatchmakerService> logger, Client
 {
     private const int BroadcastVersion = 36943350; // 2018.9.6.0
 
+    // Hazel version byte followed by the broadcast version.
+    private const int HandshakeLength = sizeof(byte) + sizeof(int);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var connectionListener = new UdpConnectionListener(
@@ -31,22 +34,62 @@ public partial class MatchmakerService(ILogger<MatchmakerService> logger, Client
     {
         var connection = newConnectionEventArgs.Connection;
 
-        var handshakeDataMessageReader = MessageReader.Get(newConnectionEventArgs.HandshakeData);
+        try
+        {
+            AcceptConnection(connection, newConnectionEventArgs.HandshakeData);
+        }
+        catch (Exception e)
+        {
+            LogNewConnectionFailed(logger, e);
+            CloseConnection(connection);
+        }
+        finally
+        {
+            newConnectionEventArgs.Recycle();
+        }
+    }
+
+    private void AcceptConnection(Connection connection, byte[] handshakeData)
+    {
+        var remoteAddress = GetRemoteAddress(connection);
+
+        if (handshakeData is not { Length: >= HandshakeLength })
+        {
+            LogMalformedHandshake(logger, remoteAddress);
+            CloseConnection(connection);
+            return;
+        }
+
+        var handshakeDataMessageReader = MessageReader.Get(handshakeData);
         var hazelVersion = handshakeDataMessageReader.ReadByte();
         var broadcastVersion = handshakeDataMessageReader.ReadInt32();
+        handshakeDataMessageReader.Recycle();
 
         if (broadcastVersion != BroadcastVersion)
         {
             SendDisconnectForIncorrectVersion(connection);
-            connection.Close();
+            CloseConnection(connection);
 
-            logger.LogDebug("Client tried to join with incompatible broadcast version");
+            LogIncompatibleBroadcastVersion(logger, remoteAddress, broadcastVersion);
             return;
         }
 
-        var client = clientManager.AddClient(connection);
+        clientManager.AddClient(connection);
+    }
 
-        newConnectionEventArgs.Recycle();
+    private static IPAddress? GetRemoteAddress(Connection connection)
+        => connection.EndPoint is NetworkEndPoint { EndPoint: IPEndPoint ipEndPoint } ? ipEndPoint.Address : null;
+
+    private void CloseConnection(Connection connection)
+    {
+        try
+        {
+            connection.Close();
+        }
+        catch (Exception e)
+        {
+            LogCloseFailed(logger, e);
+        }
     }
 
     private static void SendDisconnectForIncorrectVersion(Connection connection)
@@ -62,4 +105,16 @@ public partial class MatchmakerService(ILogger<MatchmakerService> logger, Client
         //       Should we wait a little bit and then disconnect if still connected?
         // connection.Close();
     }
+
+    [LoggerMessage(LogLevel.Debug, "Client {RemoteAddress} tried to join with incompatible broadcast version {BroadcastVersion}")]
+    static partial void LogIncompatibleBroadcastVersion(ILogger<MatchmakerService> logger, IPAddress? remoteAddress, int broadcastVersion);
+
+    [LoggerMessage(LogLevel.Debug, "Rejected a connection from {RemoteAddress} sending a malformed handshake")]
+    static partial void LogMalformedHandshake(ILogger<MatchmakerService> logger, IPAddress? remoteAddress);
+
+    [LoggerMessage(LogLevel.Error, "Failed to accept a new connection")]
+    static partial void LogNewConnectionFailed(ILogger<MatchmakerService> logger, Exception exception);
+
+    [LoggerMessage(LogLevel.Debug, "Failed to close a connection")]
+    static partial void LogCloseFailed(ILogger<MatchmakerService> logger, Exception exception);
 }
