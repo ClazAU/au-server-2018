@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -7,25 +8,31 @@ public class GameManager(IServiceProvider serviceProvider)
 {
     public IReadOnlyDictionary<GameCode, Game> Games => _games;
 
-    private readonly Dictionary<GameCode, Game> _games = [];
+    // Concurrent: every mutation here runs on a socket callback thread, so two
+    // clients sending HostGame at once were racing a plain Dictionary.
+    private readonly ConcurrentDictionary<GameCode, Game> _games = new();
 
     public bool TryCreateGame(GameCode gameCode, [NotNullWhen(true)] out Game? game)
     {
-        if (_games.ContainsKey(gameCode))
+        var candidate = ActivatorUtilities.CreateInstance<Game>(serviceProvider, gameCode);
+
+        // TryAdd, not ContainsKey-then-Add: the old check-then-act let two
+        // callers both pass the check and the second overwrite the first,
+        // stranding a live game nobody could close.
+        if (!_games.TryAdd(gameCode, candidate))
         {
+            candidate.Dispose();
             game = null;
             return false;
         }
 
-        game = ActivatorUtilities.CreateInstance<Game>(serviceProvider, gameCode);
-        _games.Add(gameCode, game);
-
+        game = candidate;
         return true;
     }
 
     public void CloseGame(GameCode gameCode)
     {
-        if (!_games.Remove(gameCode, out var game)) return;
+        if (!_games.TryRemove(gameCode, out var game)) return;
 
         game.State = Game.GameState.Closed;
 

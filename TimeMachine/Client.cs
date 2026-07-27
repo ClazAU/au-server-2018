@@ -101,6 +101,7 @@ public partial class Client(
                 {
                     // TODO: Log
                     Disconnect(JoinFailureReason.GameStarted);
+                    break;
                 }
 
                 if (game.IsFull())
