@@ -6,7 +6,11 @@ using Microsoft.Extensions.Logging;
 
 namespace TimeMachine;
 
-public partial class MatchmakerService(ILogger<MatchmakerService> logger, ClientManager clientManager) : BackgroundService
+public partial class MatchmakerService(
+    ILogger<MatchmakerService> logger,
+    ClientManager clientManager,
+    ConnectionRateLimiter connectionRateLimiter,
+    ServerOptions options) : BackgroundService
 {
     private const int BroadcastVersion = 36943350; // 2018.9.6.0
 
@@ -52,6 +56,19 @@ public partial class MatchmakerService(ILogger<MatchmakerService> logger, Client
     private void AcceptConnection(Connection connection, byte[] handshakeData)
     {
         var remoteAddress = GetRemoteAddress(connection);
+        if (remoteAddress is null || !connectionRateLimiter.TryAcceptFrom(remoteAddress))
+        {
+            LogRateLimited(logger, remoteAddress);
+            CloseConnection(connection);
+            return;
+        }
+
+        if (clientManager.Clients.Count >= options.MaxConnections)
+        {
+            LogConnectionLimitReached(logger, remoteAddress, options.MaxConnections);
+            CloseConnection(connection);
+            return;
+        }
 
         if (handshakeData is not { Length: >= HandshakeLength })
         {
@@ -111,6 +128,12 @@ public partial class MatchmakerService(ILogger<MatchmakerService> logger, Client
 
     [LoggerMessage(LogLevel.Debug, "Rejected a connection from {RemoteAddress} sending a malformed handshake")]
     static partial void LogMalformedHandshake(ILogger<MatchmakerService> logger, IPAddress? remoteAddress);
+
+    [LoggerMessage(LogLevel.Debug, "Rate limited a connection from {RemoteAddress}")]
+    static partial void LogRateLimited(ILogger<MatchmakerService> logger, IPAddress? remoteAddress);
+
+    [LoggerMessage(LogLevel.Warning, "Rejected a connection from {RemoteAddress}, at the limit of {MaxConnections} connections")]
+    static partial void LogConnectionLimitReached(ILogger<MatchmakerService> logger, IPAddress? remoteAddress, int maxConnections);
 
     [LoggerMessage(LogLevel.Error, "Failed to accept a new connection")]
     static partial void LogNewConnectionFailed(ILogger<MatchmakerService> logger, Exception exception);

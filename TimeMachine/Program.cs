@@ -56,6 +56,9 @@ internal static class Program
             .Enrich.FromLogContext()
             .WriteTo.Console());
 
+        builder.Services.AddSingleton(ServerOptions.FromEnvironment());
+        builder.Services.AddSingleton<ConnectionRateLimiter>();
+
         builder.Services.AddSingleton<ClientManager>();
         builder.Services.AddSingleton<GameManager>();
 
